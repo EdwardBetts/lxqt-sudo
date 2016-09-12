@@ -36,6 +36,7 @@
 #include <QSocketNotifier>
 #include <QDebug>
 #include <QThread>
+#include <QProcessEnvironment>
 #include <pty.h>
 #include <unistd.h>
 #include <memory>
@@ -80,11 +81,39 @@ namespace
             << QObject::tr("%1 version %2\n").arg(app_master).arg(app_version);
     }
 
+    //Note: array must be sorted to allow usage of binary search
+    static constexpr char const * const ALLOWED_VARS[] = {
+        "DISPLAY"
+            , "LANG", "LANGUAGE", "LC_ADDRESS", "LC_ALL", "LC_COLLATE", "LC_CTYPE", "LC_IDENTIFICATION", "LC_MEASUREMENT"
+            , "LC_MESSAGES", "LC_MONETARY", "LC_NAME", "LC_NUMERIC", "LC_PAPER", "LC_TELEPHONE", "LC_TIME"
+            , "XAUTHORITY"
+    };
+    static constexpr char const * const * const ALLOWED_END = ALLOWED_VARS + sizeof (ALLOWED_VARS) / sizeof (ALLOWED_VARS[0]);
+    struct assert_helper
+    {
+        assert_helper()
+        {
+            Q_ASSERT(std::is_sorted(ALLOWED_VARS, ALLOWED_END
+                        , [] (char const * const a, char const * const b) { return strcmp(a, b) < 0; }));
+        }
+    };
+    assert_helper h;
+
     inline void env_workarounds()
     {
-        //cleanup environment
-        //pcmanfm-qt will not start if the DBUS_SESSION_BUS_ADDRESS is preserved
-        unsetenv("DBUS_SESSION_BUS_ADDRESS");
+        // cleanup environment, because e.g.:
+        // - pcmanfm-qt will not start if the DBUS_SESSION_BUS_ADDRESS is preserved
+        // - Qt apps may change user's config files permissions if the XDG_* are preserved
+        for (auto const & key : QProcessEnvironment::systemEnvironment().keys())
+        {
+            auto const & i = std::lower_bound(ALLOWED_VARS, ALLOWED_END, key, [] (char const * const a, QString const & b) {
+                return b > a;
+            });
+            if (i == ALLOWED_END || key != *i)
+            {
+                unsetenv(key.toStdString().c_str());
+            }
+        }
     }
 }
 
@@ -170,7 +199,7 @@ int Sudo::main()
 void Sudo::child()
 {
     int params_cnt = 2 //1. su/sudo & last nullptr
-        + 1 //-c for su | -E for sudo
+        + (BACK_SU == mBackend ? 1 : 0) //-c for su
         + mArgs.size();
     std::unique_ptr<char const *[]> params{new char const *[params_cnt]};
     const char ** param_arg = params.get() + 1;
@@ -183,7 +212,6 @@ void Sudo::child()
     } else
     {
         program = sudo_prog.toStdString();
-        *(param_arg++) = "-E"; //preserve environment
     }
 
     params[0] = program.c_str();
